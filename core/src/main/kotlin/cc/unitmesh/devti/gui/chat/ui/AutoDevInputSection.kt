@@ -2,17 +2,23 @@ package cc.unitmesh.devti.gui.chat.ui
 
 import cc.unitmesh.devti.AutoDevBundle
 import cc.unitmesh.devti.AutoDevIcons
+import cc.unitmesh.devti.AutoDevNotifications
 import cc.unitmesh.devti.agent.custom.model.CustomAgentConfig
 import cc.unitmesh.devti.agent.custom.model.CustomAgentState
-import cc.unitmesh.devti.gui.chat.ui.file.InputFileToolbar
+import cc.unitmesh.devti.completion.AutoDevInputLookupManagerListener
 import cc.unitmesh.devti.gui.chat.ui.file.RelatedFileListCellRenderer
+import cc.unitmesh.devti.gui.chat.ui.file.RelatedFileListViewModel
 import cc.unitmesh.devti.gui.chat.ui.file.WorkspaceFilePanel
-import cc.unitmesh.devti.gui.chat.ui.viewmodel.FileListViewModel
+import cc.unitmesh.devti.gui.chat.ui.file.WorkspaceFileToolbar
+import cc.unitmesh.devti.indexer.DomainDictService
+import cc.unitmesh.devti.indexer.usage.PromptEnhancer
 import cc.unitmesh.devti.llms.tokenizer.Tokenizer
 import cc.unitmesh.devti.llms.tokenizer.TokenizerFactory
 import cc.unitmesh.devti.provider.RelatedClassesProvider
 import cc.unitmesh.devti.settings.AutoDevSettingsState
 import cc.unitmesh.devti.settings.customize.customizeSetting
+import cc.unitmesh.devti.util.AutoDevCoroutineScope
+import cc.unitmesh.devti.util.parser.CodeFence
 import com.intellij.codeInsight.lookup.LookupManagerListener
 import com.intellij.ide.IdeTooltip
 import com.intellij.ide.IdeTooltipManager
@@ -21,6 +27,7 @@ import com.intellij.openapi.actionSystem.Presentation
 import com.intellij.openapi.actionSystem.impl.ActionButton
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.runInEdt
+import com.intellij.openapi.components.service
 import com.intellij.openapi.diagnostic.logger
 import com.intellij.openapi.editor.event.DocumentEvent
 import com.intellij.openapi.editor.event.DocumentListener
@@ -51,6 +58,7 @@ import com.intellij.util.ui.JBFont
 import com.intellij.util.ui.JBUI
 import com.intellij.util.ui.UIUtil
 import com.intellij.util.ui.components.BorderLayoutPanel
+import kotlinx.coroutines.launch
 import java.awt.*
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
@@ -65,15 +73,17 @@ class AutoDevInputSection(private val project: Project, val disposable: Disposab
     private val documentListener: DocumentListener
     private val sendButtonPresentation: Presentation
     private val stopButtonPresentation: Presentation
+    private val enhanceButtonPresentation: Presentation
     private val sendButton: ActionButton
     private val stopButton: ActionButton
-    private val buttonPanel = JPanel(CardLayout())
+    private val enhanceButton: ActionButton
+    private var buttonPanel: JPanel = JPanel(CardLayout())
     private val inputPanel = BorderLayoutPanel()
     val focusableComponent: JComponent get() = input
 
-    private val fileListViewModel = FileListViewModel(project)
-    private val elementsList = JBList(fileListViewModel.getListModel())
-    
+    private val relatedFileListViewModel = RelatedFileListViewModel(project)
+    private val elementsList = JBList(relatedFileListViewModel.getListModel())
+
     private val workspaceFilePanel: WorkspaceFilePanel
 
     private val defaultRag: CustomAgentConfig = CustomAgentConfig("<Select Custom Agent>", "Normal")
@@ -89,15 +99,22 @@ class AutoDevInputSection(private val project: Project, val disposable: Disposab
         null
     }
 
-    var text: String
-        get() {
-            val files = workspaceFilePanel.getAllFilesFormat()
-            return input.text + "\n" + files
-        }
-        set(text) {
-            input.recreateDocument()
-            input.text = text
-        }
+    fun renderText(): String {
+        val files = workspaceFilePanel.getAllFilesFormat()
+        relatedFileListViewModel.clearAllFiles()
+        workspaceFilePanel.clear()
+        return input.text + "\n" + files
+    }
+
+    fun clearText() {
+        input.recreateDocument()
+        input.text = ""
+    }
+
+    fun setText(text: String) {
+        input.recreateDocument()
+        input.text = text
+    }
 
     init {
         input = AutoDevInput(project, listOf(), disposable, this)
@@ -105,12 +122,16 @@ class AutoDevInputSection(private val project: Project, val disposable: Disposab
 
         setupElementsList()
         val sendButtonPresentation = Presentation(AutoDevBundle.message("chat.panel.send"))
-        sendButtonPresentation.icon = AutoDevIcons.Send
+        sendButtonPresentation.icon = AutoDevIcons.SEND
         this.sendButtonPresentation = sendButtonPresentation
 
-        val stopButtonPresentation = Presentation("Stop")
-        stopButtonPresentation.icon = AutoDevIcons.STOP
-        this.stopButtonPresentation = stopButtonPresentation
+        this.stopButtonPresentation = Presentation(AutoDevBundle.message("chat.panel.stop")).apply {
+            icon = AutoDevIcons.STOP
+        }
+        this.enhanceButtonPresentation = Presentation(AutoDevBundle.message("chat.panel.enhance")).apply {
+            icon = AutoDevIcons.MAGIC
+            isEnabled = project.service<DomainDictService>().loadContent()?.isNotEmpty() == true
+        }
 
         sendButton = ActionButton(
             DumbAwareAction.create {
@@ -124,6 +145,15 @@ class AutoDevInputSection(private val project: Project, val disposable: Disposab
                 editorListeners.multicaster.onStop(this@AutoDevInputSection)
             },
             this.stopButtonPresentation, "", Dimension(20, 20)
+        )
+
+        enhanceButton = ActionButton(
+            DumbAwareAction.create {
+                AutoDevCoroutineScope.scope(project).launch {
+                    enhancePrompt()
+                }
+            },
+            this.enhanceButtonPresentation, "", Dimension(20, 20)
         )
 
         documentListener = object : DocumentListener {
@@ -162,23 +192,21 @@ class AutoDevInputSection(private val project: Project, val disposable: Disposab
             layoutPanel.addToLeft(customAgent)
         }
 
-
-        buttonPanel.add(sendButton, "Send")
-        buttonPanel.add(stopButton, "Stop")
+        buttonPanel = createButtonPanel()
 
         layoutPanel.addToCenter(horizontalGlue)
         layoutPanel.addToRight(buttonPanel)
 
         inputPanel.add(input, BorderLayout.CENTER)
         inputPanel.addToBottom(layoutPanel)
-        
+
         inputPanel.addToTop(workspaceFilePanel)
 
         val scrollPane = JBScrollPane(elementsList)
         scrollPane.verticalScrollBarPolicy = JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED
         scrollPane.horizontalScrollBarPolicy = JScrollPane.HORIZONTAL_SCROLLBAR_AS_NEEDED
 
-        val toolbar = InputFileToolbar.createToolbar(project, fileListViewModel, input)
+        val toolbar = WorkspaceFileToolbar.createToolbar(project, relatedFileListViewModel, input)
 
         val headerPanel = JPanel(BorderLayout())
         headerPanel.add(toolbar, BorderLayout.NORTH)
@@ -204,8 +232,43 @@ class AutoDevInputSection(private val project: Project, val disposable: Disposab
 
         val currentFile = FileEditorManager.getInstance(project).selectedFiles.firstOrNull()
         currentFile?.let {
-            fileListViewModel.addFileIfAbsent(currentFile, first = true)
+            relatedFileListViewModel.addFileIfAbsent(currentFile, first = true)
         }
+    }
+
+    private suspend fun enhancePrompt() {
+        val originalIcon = enhanceButtonPresentation.icon
+        enhanceButtonPresentation.icon = AutoDevIcons.LOADING
+        enhanceButtonPresentation.isEnabled = false
+
+        try {
+            val content = project.service<PromptEnhancer>().create(input.text)
+            val code = CodeFence.parse(content).text
+            runInEdt {
+                input.text = code
+            }
+        } catch (e: Exception) {
+            logger.error("Failed to enhance prompt", e)
+            AutoDevNotifications.error(project, e.message ?: "An error occurred while enhancing the prompt")
+        } finally {
+            enhanceButtonPresentation.icon = originalIcon
+            enhanceButtonPresentation.isEnabled = true
+        }
+    }
+
+    private fun createButtonPanel(): JPanel {
+        val panel = JPanel(CardLayout())
+
+        // Create a panel for the "Send" state that contains both enhance and send buttons
+        val sendPanel = JPanel(FlowLayout(FlowLayout.RIGHT, JBUI.scale(8), 0))
+        sendPanel.isOpaque = false
+        sendPanel.add(enhanceButton)
+        sendPanel.add(sendButton)
+
+        panel.add(sendPanel, "Send")
+        panel.add(stopButton, "Stop")
+
+        return panel
     }
 
     private fun setupEditorListener() {
@@ -215,7 +278,7 @@ class AutoDevInputSection(private val project: Project, val disposable: Disposab
                 override fun selectionChanged(event: FileEditorManagerEvent) {
                     val file = event.newFile ?: return
                     ApplicationManager.getApplication().invokeLater {
-                        fileListViewModel.addFileIfAbsent(file, true)
+                        relatedFileListViewModel.addFileIfAbsent(file, true)
                     }
                 }
             }
@@ -251,11 +314,11 @@ class AutoDevInputSection(private val project: Project, val disposable: Disposab
         val index = list.locationToIndex(e.point)
         if (index == -1) return
 
-        val wrapper = fileListViewModel.getListModel().getElementAt(index)
+        val wrapper = relatedFileListViewModel.getListModel().getElementAt(index)
         val cellBounds = list.getCellBounds(index, index)
-        
-        val actionType = fileListViewModel.determineFileAction(wrapper, e.point, cellBounds)
-        val actionPerformed = fileListViewModel.handleFileAction(wrapper, actionType) { vfile, relativePath ->
+
+        val actionType = relatedFileListViewModel.determineFileAction(wrapper, e.point, cellBounds)
+        val actionPerformed = relatedFileListViewModel.handleFileAction(wrapper, actionType) { vfile, relativePath ->
             if (relativePath != null) {
                 workspaceFilePanel.addFileToWorkspace(vfile)
                 ApplicationManager.getApplication().invokeLater {
@@ -273,7 +336,7 @@ class AutoDevInputSection(private val project: Project, val disposable: Disposab
     }
 
     private fun updateElements(elements: List<PsiElement>?) {
-        elements?.forEach { fileListViewModel.addFileIfAbsent(it.containingFile.virtualFile) }
+        elements?.forEach { relatedFileListViewModel.addFileIfAbsent(it.containingFile.virtualFile) }
     }
 
     fun showStopButton() {
@@ -377,7 +440,7 @@ class AutoDevInputSection(private val project: Project, val disposable: Disposab
         }
 
         customAgent.selectedItem = defaultRag
-        text = ""
+        input.text = ""
         workspaceFilePanel.clear()
     }
 
