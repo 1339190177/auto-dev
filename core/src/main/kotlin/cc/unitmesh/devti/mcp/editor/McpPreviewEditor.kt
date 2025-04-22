@@ -1,6 +1,7 @@
 package cc.unitmesh.devti.mcp.editor
 
 import cc.unitmesh.devti.AutoDevIcons
+import cc.unitmesh.devti.AutoDevBundle
 import cc.unitmesh.devti.AutoDevNotifications
 import cc.unitmesh.devti.llm2.model.LlmConfig
 import cc.unitmesh.devti.llms.custom.CustomLLMProvider
@@ -80,7 +81,7 @@ open class McpPreviewEditor(
     private fun createUI() {
         val headerPanel = panel {
             row {
-                val label = JBLabel("MCP tools").apply {
+                val label = JBLabel(AutoDevBundle.message("mcp.preview.editor.title")).apply {
                     font = JBUI.Fonts.label(14.0f).asBold()
                     border = JBUI.Borders.emptyLeft(8)
                     isOpaque = true
@@ -89,7 +90,7 @@ open class McpPreviewEditor(
                 cell(label).align(Align.FILL).resizableColumn()
                 
                 searchField = SearchTextField().apply {
-                    textEditor.emptyText.text = "Search tools..."
+                    textEditor.emptyText.text = AutoDevBundle.message("mcp.preview.editor.search.placeholder")
                     textEditor.document.addDocumentListener(object : DocumentListener {
                         override fun insertUpdate(e: DocumentEvent) = filterTools()
                         override fun removeUpdate(e: DocumentEvent) = filterTools()
@@ -105,7 +106,7 @@ open class McpPreviewEditor(
 
         val toolsWrapper = JPanel(BorderLayout()).apply {
             background = UIUtil.getPanelBackground()
-            border = JBUI.Borders.empty(4)
+            border = JBUI.Borders.empty()
         }
 
         toolListPanel = McpToolListPanel(project)
@@ -132,14 +133,17 @@ open class McpPreviewEditor(
 
         val chatbotPanel = BorderLayoutPanel().apply {
             background = UIUtil.getPanelBackground()
-            border = JBUI.Borders.emptyBottom(0)
+            border = CompoundBorder(
+                BorderFactory.createMatteBorder(1, 0, 0, 0, borderColor),
+                JBUI.Borders.empty()
+            )
         }
 
-        val selectorPanel = JPanel(FlowLayout(FlowLayout.LEFT, 0, 0)).apply {
+        val selectorPanel = JPanel(FlowLayout(FlowLayout.LEFT, 4, 0)).apply {
             background = UIUtil.getPanelBackground()
         }
 
-        val chatbotLabel = JBLabel("Model")
+        val chatbotLabel = JBLabel(AutoDevBundle.message("mcp.preview.editor.model.label"))
 
         val llmConfigs = LlmConfig.load()
         val modelNames = if (llmConfigs.isEmpty()) {
@@ -149,15 +153,17 @@ open class McpPreviewEditor(
         }
 
         chatbotSelector = com.intellij.openapi.ui.ComboBox(modelNames)
-        configButton = JButton("Configure").apply {
+        configButton = JButton(AutoDevBundle.message("mcp.preview.editor.configure.button")).apply {
             isFocusPainted = false
-            addActionListener { showConfigDialog() }
+            addActionListener {
+                showConfigDialog()
+            }
         }
 
         selectorPanel.add(chatbotLabel)
         selectorPanel.add(chatbotSelector)
 
-        val configPanel = JPanel(FlowLayout(FlowLayout.RIGHT)).apply {
+        val configPanel = JPanel(FlowLayout(FlowLayout.RIGHT, 4, 0)).apply {
             background = UIUtil.getPanelBackground()
             add(configButton)
         }
@@ -186,7 +192,7 @@ open class McpPreviewEditor(
         testButton = ActionButton(
             DumbAwareAction.create { sendMessage() },
             sendPresentation, 
-            "McpSendAction", 
+            "McpSendAction",
             Dimension(JBUI.scale(30), JBUI.scale(30))
         )
         val sendButtonPanel = JPanel(FlowLayout(FlowLayout.CENTER, 0, 0)).apply {
@@ -198,13 +204,26 @@ open class McpPreviewEditor(
         inputPanel.addToCenter(chatInput)
         inputPanel.addToRight(sendButtonPanel)
 
-        bottomPanel.addToTop(resultPanel)
-        bottomPanel.addToCenter(chatbotPanel)
-        bottomPanel.addToBottom(inputPanel)
+        val chatControlsPanel = JPanel(BorderLayout()).apply {
+            background = UIUtil.getPanelBackground()
+            add(chatbotPanel, BorderLayout.NORTH)
+            add(inputPanel, BorderLayout.SOUTH)
+        }
+
+        bottomPanel.add(resultPanel, BorderLayout.CENTER)
+        bottomPanel.add(chatControlsPanel, BorderLayout.SOUTH)
+
+        val splitPane = JSplitPane(JSplitPane.VERTICAL_SPLIT).apply {
+            topComponent = toolsWrapper
+            bottomComponent = bottomPanel
+            resizeWeight = 0.8
+            isContinuousLayout = true
+            border = BorderFactory.createEmptyBorder()
+            dividerSize = JBUI.scale(5)
+        }
 
         mainPanel.add(headerPanel, BorderLayout.NORTH)
-        mainPanel.add(toolsWrapper, BorderLayout.CENTER)
-        mainPanel.add(bottomPanel, BorderLayout.SOUTH)
+        mainPanel.add(splitPane, BorderLayout.CENTER)
     }
 
     private fun filterTools() {
@@ -229,7 +248,7 @@ open class McpPreviewEditor(
         }
 
         if (chatInput.text.isEmpty()) {
-            AutoDevNotifications.warn(project, "Please enter a message to send.")
+            AutoDevNotifications.warn(project, AutoDevBundle.message("mcp.preview.editor.empty.message.warning"))
             return
         }
 
@@ -245,7 +264,7 @@ open class McpPreviewEditor(
         val stream: Flow<String> = llmProvider.stream(message, systemPrompt = systemPrompt)
         
         resultPanel.reset()
-        resultPanel.setText("Loading response...")
+        resultPanel.setText(AutoDevBundle.message("mcp.preview.editor.loading.response"))
         resultPanel.isVisible = true
         mainPanel.revalidate()
         mainPanel.repaint()
@@ -268,10 +287,6 @@ open class McpPreviewEditor(
     fun setMainEditor(editor: Editor) {
         check(mainEditor.value == null)
         mainEditor.value = editor
-    }
-
-    fun scrollToSrcOffset(offset: Int) {
-        // Implementation here
     }
 
     override fun getComponent(): JComponent = mainPanel
